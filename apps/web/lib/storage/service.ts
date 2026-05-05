@@ -7,8 +7,11 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
-import { PresignedPostOptions, createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+// binarybeachio: createPresignedPost (S3 PostObject) replaced with
+// presigned-PUT — Cloudflare R2 returns HTTP 501 for PostObject. Per
+// `feedback_s3_upload_postobject` memory; mirrors `bb-plane-fork`'s
+// patch. Upstream-able as a self-host config knob.
 import { randomUUID } from "crypto";
 import { access, mkdir, readFile, rmdir, unlink, writeFile } from "fs/promises";
 import { lookup } from "mime-types";
@@ -108,8 +111,12 @@ type TGetFileResponse = {
 };
 
 // discriminated union
+// binarybeachio: the S3 branch no longer returns `presignedFields` (R2
+// doesn't support PostObject); the client uploads via PUT against
+// `signedUrl` with `Content-Type: <fileType>`. The local-storage branch
+// (signingData) is unchanged.
 type TGetSignedUrlResponse =
-  | { signedUrl: string; fileUrl: string; presignedFields: Object }
+  | { signedUrl: string; fileUrl: string }
   | {
       signedUrl: string;
       updatedFileName: string;
@@ -210,7 +217,7 @@ export const getUploadSignedUrl = async (
   }
 
   try {
-    const { presignedFields, signedUrl } = await getS3UploadSignedUrl(
+    const { signedUrl } = await getS3UploadSignedUrl(
       updatedFileName,
       fileType,
       accessType,
@@ -220,7 +227,6 @@ export const getUploadSignedUrl = async (
 
     return {
       signedUrl,
-      presignedFields,
       fileUrl: new URL(`${baseUrl}/storage/${environmentId}/${accessType}/${updatedFileName}`).href,
     };
   } catch (err) {
@@ -233,34 +239,26 @@ export const getS3UploadSignedUrl = async (
   contentType: string,
   accessType: string,
   environmentId: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   isBiggerFileUploadAllowed: boolean = false
 ) => {
-  const maxSize = IS_FORMBRICKS_CLOUD
-    ? isBiggerFileUploadAllowed
-      ? MAX_SIZES.big
-      : MAX_SIZES.standard
-    : Infinity;
-
-  const postConditions: PresignedPostOptions["Conditions"] = IS_FORMBRICKS_CLOUD
-    ? [["content-length-range", 0, maxSize]]
-    : undefined;
-
+  // binarybeachio: presigned-PUT for R2 compatibility. The
+  // content-length-range that PostObject enforced server-side is now
+  // enforced by the API route's request handler before issuing the URL,
+  // and by the client's pre-upload size check. R2 + presigned PUT will
+  // accept any body size up to the bucket's policy limit (5 GiB), so
+  // there's no behavioral regression for self-hosted.
   try {
     const s3Client = getS3Client();
-    const { fields, url } = await createPresignedPost(s3Client, {
-      Expires: 10 * 60, // 10 minutes
+    const command = new PutObjectCommand({
       Bucket: env.S3_BUCKET_NAME!,
       Key: `${environmentId}/${accessType}/${fileName}`,
-      Fields: {
-        "Content-Type": contentType,
-        "Content-Encoding": "base64",
-      },
-      Conditions: postConditions,
+      ContentType: contentType,
     });
+    const url = await getSignedUrl(s3Client, command, { expiresIn: 10 * 60 });
 
     return {
       signedUrl: url,
-      presignedFields: fields,
     };
   } catch (err) {
     throw err;

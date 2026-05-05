@@ -141,16 +141,32 @@ export class ApiClient {
 
     const signedUrlCopy = signedUrl.replace("http://localhost:3000", this.appUrl);
 
+    // binarybeachio: three upload paths — see comment in
+    // apps/web/app/lib/fileUpload.ts.
     try {
-      uploadResponse = await fetch(signedUrlCopy, {
-        method: "POST",
-        body: presignedFields
-          ? formDataForS3
-          : JSON.stringify({
-              ...formData,
-              ...localUploadDetails,
-            }),
-      });
+      if (presignedFields) {
+        uploadResponse = await fetch(signedUrlCopy, {
+          method: "POST",
+          body: formDataForS3,
+        });
+      } else if (signingData) {
+        uploadResponse = await fetch(signedUrlCopy, {
+          method: "POST",
+          body: JSON.stringify({
+            ...formData,
+            ...localUploadDetails,
+          }),
+        });
+      } else {
+        const binaryString = atob(file.base64.split(",")[1]);
+        const uint8Array = Uint8Array.from([...binaryString].map((char) => char.charCodeAt(0)));
+        const blob = new Blob([uint8Array], { type: file.type });
+        uploadResponse = await fetch(signedUrlCopy, {
+          method: "PUT",
+          headers: { "Content-Type": file.type },
+          body: blob,
+        });
+      }
     } catch (err) {
       console.error("Error uploading file", err);
     }

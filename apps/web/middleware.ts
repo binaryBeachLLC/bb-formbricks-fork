@@ -1,5 +1,6 @@
 import { isPublicDomainConfigured, isRequestFromPublicDomain } from "@/app/middleware/domain-utils";
 import { isAuthProtectedRoute, isRouteAllowedForDomain } from "@/app/middleware/endpoint-validator";
+import { enforceEdgeIdentity } from "@/_bb_shared/edge-identity";
 import { WEBAPP_URL } from "@/lib/constants";
 import { isValidCallbackUrl } from "@/lib/utils/url";
 import { getToken } from "next-auth/jwt";
@@ -60,6 +61,15 @@ export const middleware = async (originalRequest: NextRequest) => {
   // Handle domain-aware routing first
   const domainResponse = handleDomainAwareRouting(originalRequest);
   if (domainResponse) return domainResponse;
+
+  // binarybeachio: per-app edge-identity validation. Compares
+  // `X-Auth-Request-User` (set by oauth2-proxy at the platform edge) to
+  // the `_bb_edge_sub` marker cookie set by the trusted-JWT route.
+  // Per `docs/conventions/per-app-edge-identity-validation.md`. Runs
+  // before the NextAuth check so a mismatched edge identity invalidates
+  // the local session before the auth middleware sees it.
+  const edgeResponse = enforceEdgeIdentity(originalRequest);
+  if (edgeResponse) return edgeResponse;
 
   // Create a new Request object to override headers and add a unique request ID header
   const request = new NextRequest(originalRequest, {

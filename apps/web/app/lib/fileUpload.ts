@@ -89,6 +89,15 @@ export const handleFileUpload = async (
       };
     }
 
+    // binarybeachio: three upload paths to handle the three server-side
+    // shapes (per `apps/web/lib/storage/service.ts`):
+    //   - presignedFields present  -> AWS S3 / upstream PostObject
+    //                                 (multipart FormData POST)
+    //   - signingData present      -> local filesystem upload
+    //                                 (JSON POST to /api/v1/.../storage/local)
+    //   - neither                  -> R2-friendly presigned PUT (this
+    //                                 fork's default with S3_ENDPOINT_URL set
+    //                                 to an R2 endpoint)
     const fileBase64 = (await toBase64(file)) as string;
 
     const formData: Record<string, string> = {};
@@ -116,15 +125,27 @@ export const handleFileUpload = async (
 
     formData.fileBase64String = fileBase64;
 
-    const uploadResponse = await fetch(signedUrl, {
-      method: "POST",
-      body: presignedFields
-        ? formDataForS3
-        : JSON.stringify({
-            ...formData,
-            ...localUploadDetails,
-          }),
-    });
+    let uploadResponse: Response;
+    if (presignedFields) {
+      uploadResponse = await fetch(signedUrl, {
+        method: "POST",
+        body: formDataForS3,
+      });
+    } else if (signingData) {
+      uploadResponse = await fetch(signedUrl, {
+        method: "POST",
+        body: JSON.stringify({
+          ...formData,
+          ...localUploadDetails,
+        }),
+      });
+    } else {
+      uploadResponse = await fetch(signedUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type },
+        body: file,
+      });
+    }
 
     if (!uploadResponse.ok) {
       return {

@@ -88,16 +88,32 @@ export class StorageAPI {
 
     const signedUrlCopy = signedUrl.replace("http://localhost:3000", this.appUrl);
 
+    // binarybeachio: three upload paths — see comment in
+    // apps/web/app/lib/fileUpload.ts. Server-side R2-friendly path
+    // returns neither presignedFields nor signingData → presigned PUT.
     try {
-      uploadResponse = await fetch(signedUrlCopy, {
-        method: "POST",
-        body: presignedFields
-          ? formDataForS3
-          : JSON.stringify({
-              ...formData,
-              ...localUploadDetails,
-            }),
-      });
+      if (presignedFields) {
+        uploadResponse = await fetch(signedUrlCopy, {
+          method: "POST",
+          body: formDataForS3,
+        });
+      } else if (signingData) {
+        uploadResponse = await fetch(signedUrlCopy, {
+          method: "POST",
+          body: JSON.stringify({
+            ...formData,
+            ...localUploadDetails,
+          }),
+        });
+      } else {
+        const buffer = Buffer.from(file.base64.split(",")[1], "base64");
+        const blob = new Blob([buffer], { type: file.type });
+        uploadResponse = await fetch(signedUrlCopy, {
+          method: "PUT",
+          headers: { "Content-Type": file.type },
+          body: blob,
+        });
+      }
     } catch (err) {
       console.error("Error uploading file", err);
     }
