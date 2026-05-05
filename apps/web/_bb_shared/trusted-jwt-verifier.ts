@@ -30,6 +30,7 @@
 // a JWKS document at `/.well-known/jwks.json` — at that point this module
 // gets a key-set abstraction. Today, one key, one fingerprint, simple.
 
+import { createHash } from "node:crypto";
 import { verify as jwtVerify } from "jsonwebtoken";
 
 export interface VerifiedClaims {
@@ -85,7 +86,6 @@ export class TrustedJwtVerifier {
       cacheTtlMs: DEFAULT_CACHE_TTL_MS,
       clockToleranceSeconds: DEFAULT_CLOCK_TOLERANCE_S,
       log: (lvl, msg, meta) =>
-        // eslint-disable-next-line no-console
         console[lvl === "info" ? "log" : lvl](`[trusted-jwt] ${msg}`, meta ?? ""),
       ...opts,
     };
@@ -202,7 +202,5 @@ function pemToDer(pem: string): Uint8Array {
 }
 
 function sha256Hex(bytes: Uint8Array): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { createHash } = require("crypto") as typeof import("crypto");
   return createHash("sha256").update(bytes).digest("hex");
 }

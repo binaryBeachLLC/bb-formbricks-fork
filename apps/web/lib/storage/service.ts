@@ -239,8 +239,7 @@ export const getS3UploadSignedUrl = async (
   contentType: string,
   accessType: string,
   environmentId: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  isBiggerFileUploadAllowed: boolean = false
+  _isBiggerFileUploadAllowed: boolean = false
 ) => {
   // binarybeachio: presigned-PUT for R2 compatibility. The
   // content-length-range that PostObject enforced server-side is now

@@ -5,6 +5,14 @@
 // additive (a new route, no upstream files modified) and lives entirely in
 // AGPL-licensed space — `apps/web/modules/ee/` is not touched.
 //
+// SESSION-STRATEGY NOTE (v3.17.1): Formbricks v3.17.1 uses NextAuth's JWT
+// session strategy (default — no `strategy:` field in authOptions.ts:292).
+// The session cookie is a JWE-encrypted JWT signed with NEXTAUTH_SECRET; no
+// DB Session row. We mint a compatible JWT via `encode()` from
+// `next-auth/jwt` and set it as `__Secure-next-auth.session-token`.
+// On the next request, NextAuth's jwt() callback (authOptions.ts:296)
+// hydrates the token with `profile` and `isActive` from the User row.
+//
 // FLOW (GET-with-token, mirrors bb-plane-fork's trusted view):
 //   1. Bridge dispatcher resolves the tenant, runs the per-tenant email
 //      allowlist, mints an RS256 JWT with claims:
@@ -61,12 +69,12 @@
 //     is satisfied if the user ever interacts with that path.
 
 import { Prisma } from "@prisma/client";
+import { encode as encodeJwt } from "next-auth/jwt";
 import { type NextRequest, NextResponse } from "next/server";
-import { randomBytes } from "node:crypto";
 import { prisma } from "@formbricks/database";
 import { logger } from "@formbricks/logger";
 import { TrustedJwtVerifier, type VerifiedClaims } from "@/_bb_shared/trusted-jwt-verifier";
-import { SESSION_MAX_AGE, WEBAPP_URL } from "@/lib/constants";
+import { NEXTAUTH_SECRET, SESSION_MAX_AGE, WEBAPP_URL } from "@/lib/constants";
 import { createMembership } from "@/lib/membership/service";
 import { createOrganization } from "@/lib/organization/service";
 import { getRedisClient } from "@/modules/cache/redis";
@@ -158,8 +166,7 @@ export const GET = async (req: NextRequest): Promise<NextResponse> => {
     email.split("@")[0];
 
   let userId: string;
-  let sessionToken: string;
-  let sessionExpires: Date;
+  let userIsActive: boolean;
 
   try {
     const result = await prisma.$transaction(async (tx) => {
@@ -181,7 +188,12 @@ export const GET = async (req: NextRequest): Promise<NextResponse> => {
           isActive: true,
           lastLoginAt: new Date(),
         },
-        select: { id: true, name: true, memberships: { select: { id: true } } },
+        select: {
+          id: true,
+          name: true,
+          isActive: true,
+          memberships: { select: { organizationId: true } },
+        },
       });
 
       if (user.memberships.length === 0 && autoCreateOrg()) {
@@ -191,22 +203,11 @@ export const GET = async (req: NextRequest): Promise<NextResponse> => {
         await createMembership(org.id, user.id, { role: "owner", accepted: true });
       }
 
-      const tokenValue = randomBytes(48).toString("base64url");
-      const expires = new Date(Date.now() + SESSION_MAX_AGE * 1000);
-      await tx.session.create({
-        data: {
-          sessionToken: tokenValue,
-          userId: user.id,
-          expires,
-        },
-      });
-
-      return { userId: user.id, sessionToken: tokenValue, expires };
+      return { userId: user.id, isActive: user.isActive };
     });
 
     userId = result.userId;
-    sessionToken = result.sessionToken;
-    sessionExpires = result.expires;
+    userIsActive = result.isActive;
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError) {
       logger.error({ code: err.code, msg: err.message }, "[bb-bridge] Prisma error during upsert");
@@ -215,6 +216,41 @@ export const GET = async (req: NextRequest): Promise<NextResponse> => {
     }
     return NextResponse.json({ error: "internal error" }, { status: 500 });
   }
+
+  // Mint a NextAuth-compatible JWT. Formbricks v3.17.1 uses the JWT session
+  // strategy (authOptions.ts:292 has only maxAge — no `strategy:` field, so
+  // NextAuth defaults to JWT). The session cookie is a JWE encrypted with
+  // NEXTAUTH_SECRET. We populate the same fields NextAuth's `jwt()`
+  // callback would set (authOptions.ts:296):
+  //   email      — the user's email (used by getUserByEmail in the callback)
+  //   sub        — the user id (NextAuth standard)
+  //   profile.id — what authOptions.ts's session() callback projects to
+  //                session.user
+  //   isActive   — set by the same callback
+  // The next request after this trusted sign-in still hits the jwt()
+  // callback which re-fetches the user; our pre-populated values let the
+  // first render work without an extra round-trip.
+  if (!NEXTAUTH_SECRET) {
+    logger.error("[bb-bridge] NEXTAUTH_SECRET not set — cannot mint session");
+    return NextResponse.json({ error: "server misconfigured" }, { status: 500 });
+  }
+  let sessionJwt: string;
+  try {
+    sessionJwt = await encodeJwt({
+      token: {
+        email,
+        sub: userId,
+        profile: { id: userId },
+        isActive: userIsActive,
+      },
+      secret: NEXTAUTH_SECRET,
+      maxAge: SESSION_MAX_AGE,
+    });
+  } catch (err) {
+    logger.error({ err }, "[bb-bridge] failed to encode NextAuth JWT");
+    return NextResponse.json({ error: "internal error" }, { status: 500 });
+  }
+  const sessionExpires = new Date(Date.now() + SESSION_MAX_AGE * 1000);
 
   logger.info(
     { userId, email, sub: claims.sub, redirectTo },
@@ -231,7 +267,7 @@ export const GET = async (req: NextRequest): Promise<NextResponse> => {
   const response = NextResponse.redirect(redirectTo);
   response.cookies.set({
     name: cookieName,
-    value: sessionToken,
+    value: sessionJwt,
     expires: sessionExpires,
     httpOnly: true,
     secure: isSecure,
