@@ -74,9 +74,8 @@ import { type NextRequest, NextResponse } from "next/server";
 import { prisma } from "@formbricks/database";
 import { logger } from "@formbricks/logger";
 import { TrustedJwtVerifier, type VerifiedClaims } from "@/_bb_shared/trusted-jwt-verifier";
+import { BILLING_LIMITS, PROJECT_FEATURE_KEYS } from "@/lib/constants";
 import { NEXTAUTH_SECRET, SESSION_MAX_AGE, WEBAPP_URL } from "@/lib/constants";
-import { createMembership } from "@/lib/membership/service";
-import { createOrganization } from "@/lib/organization/service";
 import { getRedisClient } from "@/modules/cache/redis";
 
 // ---- Configuration (env-driven, evaluated lazily) ----
@@ -197,10 +196,39 @@ export const GET = async (req: NextRequest): Promise<NextResponse> => {
       });
 
       if (user.memberships.length === 0 && autoCreateOrg()) {
-        const org = await createOrganization({
-          name: `${user.name || email}'s Organization`,
+        // Inline createOrganization + createMembership so they run inside
+        // the same `tx`. The lib/{organization,membership}/service.ts
+        // helpers use the outer `prisma` client and don't accept a tx
+        // parameter; calling them here would cause a FK violation
+        // because the User upsert isn't visible to the outer client
+        // until the transaction commits.
+        const org = await tx.organization.create({
+          data: {
+            name: `${user.name || email}'s Organization`,
+            billing: {
+              plan: PROJECT_FEATURE_KEYS.FREE,
+              limits: {
+                projects: BILLING_LIMITS.FREE.PROJECTS,
+                monthly: {
+                  responses: BILLING_LIMITS.FREE.RESPONSES,
+                  miu: BILLING_LIMITS.FREE.MIU,
+                },
+              },
+              stripeCustomerId: null,
+              periodStart: new Date(),
+              period: "monthly",
+            },
+          },
+          select: { id: true },
         });
-        await createMembership(org.id, user.id, { role: "owner", accepted: true });
+        await tx.membership.create({
+          data: {
+            userId: user.id,
+            organizationId: org.id,
+            role: "owner",
+            accepted: true,
+          },
+        });
       }
 
       return { userId: user.id, isActive: user.isActive };

@@ -121,13 +121,15 @@ RUN chmod -R 755 ./node_modules/@noble/hashes
 COPY --from=installer /app/node_modules/zod ./node_modules/zod
 RUN chmod -R 755 ./node_modules/zod
 
-# binarybeachio: pin Prisma CLI to the version in packages/database/package.json
-# (extracted to /prisma_version.txt at line 63). Upstream's `npm install -g prisma`
-# pulls the floating latest, which at v7.8.0+ dropped support for
-# `url = env("DATABASE_URL")` in schema.prisma — Formbricks v3.17.1's schema
-# uses that syntax, so unpinned installs crashloop on first migration with
-# Prisma error P1012. Pinning matches the installer-stage Prisma client.
-RUN npm install -g "prisma@$(cat /prisma_version.txt)"
+# binarybeachio: pin Prisma CLI to the version in packages/database/package.json.
+# That version is extracted to /prisma_version.txt in the installer stage
+# (line 63), then COPYed into the runner stage at line 109 with destination "."
+# — which resolves to WORKDIR /home/nextjs, not /. Read from the workdir-
+# relative path. Upstream's bare `npm install -g prisma` pulls floating
+# latest; at v7.8.0+ that dropped support for `url = env("DATABASE_URL")` in
+# schema.prisma — Formbricks v3.17.1's schema uses that syntax, so unpinned
+# installs crashloop on first migration with Prisma error P1012.
+RUN npm install -g "prisma@$(cat ./prisma_version.txt)"
 
 # Create a startup script to handle the conditional logic
 COPY --from=installer /app/apps/web/scripts/docker/next-start.sh /home/nextjs/start.sh
